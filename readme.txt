@@ -1,0 +1,5 @@
+webcomplier为windows下很流行的一种电子书编译工具,它能把一系列的网页打包编译成exe,这样就可以很方便的阅读电子书
+但是这样也会有很多麻烦,包括兼容性,不能够在非Windows平台执行,无法获得内部的文字资源
+有网友用delphi语言写了unwebcompiler,这是一个开源的软件,只能用特定的Delphi编译,同样只能在windows下使用,为了能够在linux下使用这样的软件,我便将这个unwebcompiler用c++改写,但是里面的主要压缩算法lh5由于本人水平不足还是没办法改写,所以lh5解压算法还是由pascal实现,用fpc编译.
+编译需求:g++ fpc
+cat.exe 是测试用的电子书
