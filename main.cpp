@@ -1,215 +1,332 @@
-#include<iostream>
-#include<fstream>
-#include<vector>
-#include<iomanip>
-#include<cstring>
+#include<cstdio>
 #include<cstdlib>
+#include<cstring>
+#include<iomanip>
+#include<iostream>
+#include<vector>
+
 using namespace std;
 
+#include<stdint.h>
+#include<unistd.h>
 #include<sys/stat.h>
 #include<sys/types.h>
 
-int main(int argc,char *argv[])
-{
-/*
-	for (int i=0;i<argc;i++)
-	cout<<argv[i]<<endl;
-*/
-	if(argc>2)		//只解压单个文件
-	{
-		cout<<"请解压单个文件!"<<endl;
-		return 1;
-	}
-	char *in=argv[1];	//要解压的文件
+extern "C" void lh5Decode(FILE *inputfile, FILE *outputfile, uint32_t originalsize, uint32_t compressedsize);
 
-	string ts=in,basename;
-	basename.assign(ts,0,ts.size()-4);//文件名截除后缀
+#define DATABUF_SIZE 8192
+
+bool verbose = false;
+
+bool fileExists(const char *pathname)
+{
+	struct stat stFileInfo;
+	int intStat;
+	intStat = stat(pathname, &stFileInfo);
+	if (intStat == 0)
+		return true;
+	return false;
+}
+
+bool makeDirectory(const char *pathname, mode_t mode)
+{
+	string directory = pathname;
+	if (directory.empty())
+		return true;
+	if (directory[directory.size() - 1] != '/')
+		directory += '/';
+	size_t pos = 1;
+	while ((pos = directory.find_first_of('/', pos)) != string::npos)
+	{
+		string parentDir = directory.substr(0, pos);
+		if (!parentDir.empty() && !fileExists(parentDir.c_str()))
+		{
+			int n = mkdir(parentDir.c_str(), mode);
+			if (n) return false;
+		}
+		pos++;
+	}
+	return true;
+}
+
+const char* getBaseOutputPath(const char *filepath, const char *baseoutpath)
+{
+	string inpath = filepath;
+	size_t fnStart = inpath.find_last_of('/');
+	string inname = inpath.substr(fnStart + 1);
+	inpath = inpath.substr(0, fnStart + 1);
+
+	size_t extStart = inname.find_last_of('.');
+	inname = inname.substr(0, extStart);
+
+	string base;
+	if (baseoutpath == NULL || baseoutpath[0] == '\0')
+	{
+		base = inpath + inname + '/';
+	}
+	else
+	{
+		base = baseoutpath;
+		if (base[base.size() - 1] != '/')
+			base += '/';
+		base += inname + '/';
+	}
+	char *baseStr = (char *) base.c_str();
+	size_t baseLen = strlen(baseStr) + 1;
+	char *retStr = (char *) malloc(baseLen);
+	strncpy(retStr, baseStr, baseLen);
+	return retStr;
+}
+
+int extract(const char *filepath, const char *baseoutpath)
+{
+	string basename = getBaseOutputPath(filepath, baseoutpath);
 
 	bool iscomp;			//数据是否压缩
-	long offsetad;			//数据的偏移量
-	long filenum;			//数据个数
-	long filenamelen;		//数据名长度
-	int aj=1,ii;		//aj:解密计数器
-	int k=0;			//跳过空字符控制参数
-	long title1len;		//第一标题长度
-	long title2len;		//第二标题长度
-	string dataname,cls;
+	uint32_t offsetad;		//数据的偏移量
+	uint32_t filenum;		//数据个数
+	uint32_t filenamelen;		//数据名长度
+	int aj = 1;			//aj:解密计数器
 
-	char maindir[30];
-	strcpy(maindir,basename.c_str());
-	mkdir(maindir,0777);		//创建主文件夹
-
-	fstream fin(in,ios_base::in|ios_base::binary);
+	// open input file
+	FILE *fin = fopen(filepath, "rb");
 	if(!fin) 
 	{
-		cout<<"文件不存在!"<<endl;
+		cout << "    Unable to open file!" << endl;
 		return 1;
 	}
 
-	fin.seekg(-4,ios_base::end);
-	vector<char> buf(4);
-	fin.read(&buf[0],4);//简单文件判断,看是否为正确的文件
-	if(((int)buf[0]!=-17)||((int)buf[1]!=81)||((int)buf[2]!=42)||((int)buf[3]!=1))
+	// check file format
+	fseek(fin, -4, SEEK_END);
+	unsigned char buf[4];
+	fread(&buf[0], sizeof(buf), 1, fin);
+	if((buf[0]!=0xef)||(buf[1]!=0x51)||(buf[2]!=0x2a)||(buf[3]!=0x01))
 	{
-		cout<<"不是可解压文件!"<<endl;
+		cout << "    Unrecognzied file format!" << endl;
 		return 1;
 	}
 
-	fin.seekg(-8,ios_base::end);//数据头的首偏移量地址在文件的[-8..-5]上存储
-	long filenameblockbegin;
-	fin.read((char*)&filenameblockbegin,sizeof(filenameblockbegin));
-	//cout<<"文件数据块的起始偏移地址:"<<filenameblockbegin<<endl;		//测试语句,文件头数据块的偏移地址,对照软件,看是否出错
-
-	fin.seekg(filenameblockbegin,ios_base::beg);//指针指向文件头
-	fin.read((char*)&filenum,sizeof(filenum));//文件头的最前四位为数据的个数
-//	cout<<"数据个数:"<<filenum<<endl;		//数据个数
-	filenameblockbegin=fin.tellg();			//保存当前地址
-
-	//for(int i=0;i<filenum;i++)
-	for(int i=0;i<filenum;i++)
+	// create base output directory
+	if (!makeDirectory(basename.c_str(), 0777))
 	{
-		//cout<<">>>>>>>>>>第 "<<i+1<<" 个文件<<<<<<<<<<<<<<<<<<<<<<<<<<<"<<endl;
-		fin.seekg(filenameblockbegin,ios_base::beg);
-		fin.read((char*)&filenamelen,sizeof(filenamelen));//读入文件名大小
-		//cout<<"数据名大小:"<<filenamelen-5<<endl;
-		if(filenamelen>100) return 1;			//测试判断语句,数据名长度不可能超过100
+		cout << "    Unable to create directory: " << basename << endl;
+		return 1;
+	}
 
-		vector<char> buff(filenamelen);
-		fin.read(&buff[0],filenamelen);			//读取加密的文件名
-		dataname+='.';
-		dataname+='/';
-		dataname+=basename;
-		dataname+='/';			//创建文件的相对路径:"./basename/....."
-		for(int j=0;j<filenamelen;j++)
+	// get offset to header block
+	fseek(fin, -8, SEEK_END); //数据头的首偏移量地址在文件的[-8..-5]上存储
+	uint32_t filenameblockbegin;
+	fread(&filenameblockbegin, sizeof(filenameblockbegin), 1, fin);
+
+	// get number of files
+	fseek(fin, filenameblockbegin, SEEK_SET); //指针指向文件头
+	fread(&filenum, sizeof(filenum), 1, fin); //文件头的最前四位为数据的个数
+	filenameblockbegin = ftell(fin); //保存当前地址
+
+	for(uint32_t i = 0; i < filenum; i++)
+	{
+		fseek(fin, filenameblockbegin, SEEK_SET);
+		fread(&filenamelen, sizeof(filenamelen), 1, fin); //读入文件名大小
+		if (filenamelen > 100)
 		{
-			if(aj>129) aj-=129;
-			ii=buff[j]^(aj+126);			//文件名解密
-			if(j>4) 					//删除文件中使用的windows路径:"E:\0\"
-			{
-				char t1=(char)ii;
-				if(t1==92)		//把windows下的目录符号'\'改为linux下的目录符号'/'
-				{
-					char subdir[50];
-					strcpy(subdir,dataname.c_str());
-					mkdir (subdir,0777);
-					t1=47;
-				}
-				dataname+=t1;
-			}
-			aj+=1;
+			//测试判断语句,数据名长度不可能超过100
+			cout << "    Invalid path name length: " << filenamelen << endl;
+			return 1; 
 		}
-		//cout<<"文件名:"<<dataname<<endl;
 
+		// get file path
+		unsigned char *buff = (unsigned char *)malloc(filenamelen + 1);
+		fread(buff, filenamelen, 1, fin); //读取加密的文件名
 
-		fin.read((char*)&offsetad,sizeof(offsetad));//下面4字节为数据的绝对偏移量
-	//	cout<<"偏移量:"<<offsetad<<endl;
+		// decode filepath
+		string origpath;
+		for(uint32_t j = 0; j < filenamelen; j++)
+		{
+			if (aj > 129) aj -= 129;
+			uint32_t ii = buff[j] ^ (aj+126); //文件名解密
+			origpath += (char) ii;
+			aj += 1;
+		}
+		free(buff);
 
+		// construct output path from original path
+		string dataname = basename;
+		uint32_t pos = 0;
+		// strips windows path (e.g. "E:\0\")
+		if (origpath[0] == '\\' && origpath[1] == '\\')
+			pos = 2;
+		if (origpath[1] == ':' && origpath[2] == '\\')
+			pos = 3;
+		if (origpath[1] == ':' && origpath[2] != '\\')
+		{
+			cout << "    Invalid path: " << origpath << endl;
+			return 1;
+		}
+		// convert directory separator '\\' to '/'
+		for (uint32_t j = pos; j < origpath.size(); j++)
+			dataname += (origpath[j] == '\\' ? '/' : origpath[j]);
 
-		filenameblockbegin=fin.tellg();		//马上要指向真实数据的绝对偏移量,保存当前指针
+		// create directory
+		size_t ppos = dataname.find_last_of('/');
+		if (ppos != string::npos)
+		{
+			string datadir = dataname.substr(0, ppos + 1);
+			if (!makeDirectory(datadir.c_str(), 0777))
+			{
+				cout << "    Unable to create directory: " << dataname << endl;
+				return 1;
+			}
+		}
+
+		if (verbose)
+		{
+			cout << "    " << origpath << " => " << dataname << endl;
+		}
+
+		fread(&offsetad, sizeof(offsetad), 1, fin); //下面4字节为数据的绝对偏移量
+		filenameblockbegin = ftell(fin); //马上要指向真实数据的绝对偏移量,保存当前指针
 
 		//转移到压缩数据地址绝对偏移量
-		fin.seekg(offsetad,ios_base::beg);
-		vector <char> sum(8);	//如果数据为压缩数据的话,压缩数据的前八位为压缩文件头
-		fin.read(&sum[0],8);		//检测是否压缩
-		if((sum[0]+sum[1]+sum[2]+sum[3]+sum[4]+sum[5]+sum[6]+sum[7])!=546)//如果不是压缩数据
-		{					//通过计算文件头的sum,判断是否压缩
+		fseek(fin, offsetad, SEEK_SET);
+		unsigned char sum[8];	//如果数据为压缩数据的话,压缩数据的前八位为压缩文件头
+		fread(&sum[0], 8, 1, fin);		//检测是否压缩
+		uint32_t bc;
+		//通过计算文件头的sum,判断是否压缩
+		if((sum[0]+sum[1]+sum[2]+sum[3]+sum[4]+sum[5]+sum[6]+sum[7])!=546)
+		{
 			iscomp=false;
-		//	cout<<"----------------------Not Compressed"<<endl;
 		}
-		else//如果是压缩数据
+		else
 		{
 			iscomp=true;
-			long bc;
-			fin.read((char*)&bc,sizeof(bc));	//压缩文件头后4位为压缩前文件的大小
-		//	cout<<"压缩前大小:"<<bc<<endl;
+			fread(&bc, sizeof(bc), 1, fin);	//压缩文件头后4位为压缩前文件的大小
 		}
-		long ac;	//压缩后或者存储数据的大小
-		fin.seekg(filenameblockbegin,ios_base::beg);	//回到文件头,读取存储数据的大小
-		fin.read((char*)&ac,sizeof(ac));			//读取存储数据的大小
-		filenameblockbegin=fin.tellg();			//保存文件指针
-		/*if(iscomp)
-			cout<<"压缩数据大小:";
-		else
-			cout<<"存储数据大小:";
-		cout<<ac<<endl;
-		*/
+		uint32_t ac; //压缩后或者存储数据的大小
+		fseek(fin, filenameblockbegin, SEEK_SET); //回到文件头,读取存储数据的大小
+		fread(&ac, sizeof(ac), 1, fin); //读取存储数据的大小
+		filenameblockbegin = ftell(fin); //保存文件指针
 
-		fin.seekg(4,ios_base::cur);//跳过4字节无用信息
-		fin.read((char*)&title1len,sizeof(title1len));//下四字节为标题一长度
-		filenameblockbegin=fin.tellg();
+		// Title
+		uint32_t title1len = 0; //第一标题长度
+		uint32_t title2len = 0; //第二标题长度
 
-		if(title1len>0)		//如果有标题一
+		fseek(fin, 4, SEEK_CUR); //跳过4字节无用信息
+		fread(&title1len, sizeof(title1len), 1, fin); //下四字节为标题一长度
+		filenameblockbegin = ftell(fin);
+
+		if (title1len > 0) //如果有标题一
 		{
-		//	cout<<"title1len: "<<title1len<<endl;
-			aj+=title1len;		//增加加密参数
-			filenameblockbegin+=title1len;//跳过标题一
-			fin.seekg(filenameblockbegin,ios_base::beg);//指针跳过标题一
-			fin.read((char*)&title2len,sizeof(title2len));	//下四字节为标题二长度
-			filenameblockbegin=fin.tellg();			//保存指针
-
+			aj += title1len; //增加加密参数
+			filenameblockbegin += title1len; //跳过标题一
+			fseek(fin, filenameblockbegin, SEEK_SET); //指针跳过标题一
+			fread(&title2len, sizeof(title2len), 1, fin); //下四字节为标题二长度
+			filenameblockbegin=ftell(fin); //保存指针
 		}
-		if(title2len>0)		//如果标题二存在
+		if (title2len > 0) //如果标题二存在
 		{
-			//cout<<"title2len:"<<title2len<<endl;
-			aj+=title2len;		//增加加密参数
-			filenameblockbegin+=title2len;	//跳过标题二长度
+			aj += title2len; //增加加密参数
+			filenameblockbegin += title2len; //跳过标题二长度
 		}
-		fin.seekg(filenameblockbegin,ios_base::beg);	//重装指针
+		fseek(fin, filenameblockbegin, SEEK_SET); //重装指针
 
-		buf[0]=0;
-		for(k=0;k!=255;k++)// 用于防止死循环
+		//跳过空字符控制参数
+		buf[0] = 0;
+		for (unsigned int k = 0; k < 255; k++) // 用于防止死循环
 		{
-		if((int)buf[0]>1) {break;};	//有压缩的格式
-		if((int)buf[0]==1) filenameblockbegin+=1;	//无压缩的格式
-		fin.read(&buf[0],1);
+			if(buf[0] > 1) break; //有压缩的格式
+			if(buf[0] == 1) filenameblockbegin += 1; //无压缩的格式
+			fread(&buf[0], 1, 1, fin);
 		}
 
-		if(!iscomp)	//测试非压缩数据
+		if(!iscomp) //测试非压缩数据
 		{
-			//cout<<"Uncompress"<<endl;
-			int storep=fin.tellg();
-			fin.seekg(offsetad,ios_base::beg);
-			vector<char> out(ac);
-			fin.read(&out[0],ac);
-			char filename[50];
-			strcpy(filename,dataname.c_str());
-			fstream of(filename,ios_base::out|ios::binary);
-			of.write(&out[0],ac);
-			of.close();
-			fin.seekg(storep,ios_base::beg);
+			int storep = ftell(fin);
+			fseek(fin, offsetad, SEEK_SET);
+			char *databuf = (char *) malloc(DATABUF_SIZE);
+			FILE *fout = fopen(dataname.c_str(), "wb");
+			size_t remaining = ac;
+			while (remaining > 0)
+			{
+				size_t bytes = DATABUF_SIZE > remaining ? remaining : DATABUF_SIZE;
+				bytes = fread(&databuf[0], 1, bytes, fin);
+				fwrite(&databuf[0], bytes, 1, fout);
+				remaining -= bytes;
+			}
+			fclose(fout);
+			free(databuf);
+			fseek(fin, storep, SEEK_SET);
 		}
-
-		else//测试压缩数据
+		else //测试压缩数据
 		{
-			int storep=fin.tellg();		//要执行解压,保存指针
-			fin.seekg(offsetad,ios_base::beg);
-			vector<char>out(ac);		//ac为存储数据的大小
-			fin.read(&out[0],ac);
-			vector<char>com(ac);
-			for(int j1=8;j1<12;j1++)
-				com[j1-8]=out[j1];
-			for(int j1=4;j1<ac-16;j1++)
-				com[j1]=out[j1+17];
-			fstream of("temp.temp",ios_base::out|ios::binary);
-			of.write(&com[0],ac-17);
-			of.close();
-			string cmd;
-			cmd+="lh5 temp.temp ";
-			cmd+=dataname;
-			char filename[50];
-			strcpy(filename,cmd.c_str());
-
-			system(filename);
-			system("rm temp.temp");
-			fin.seekg(storep,ios_base::beg);
+			int storep = ftell(fin); //要执行解压,保存指针
+			fseek(fin, offsetad + 21, SEEK_SET);
+			FILE *fout = fopen(dataname.c_str(), "wb");
+			lh5Decode(fin, fout, bc, ac);
+			fclose(fout);
+			fseek(fin, storep, SEEK_SET);
 		}
 	
-		dataname=cls;//	文件名清空用于下一次循环
-		filenameblockbegin=fin.tellg();	//保存文件指针
-		filenameblockbegin-=1;//刚读出的字符为有用信息,且已经读出,所以退回
-
+		filenameblockbegin = ftell(fin); //保存文件指针
+		filenameblockbegin -= 1; //刚读出的字符为有用信息,且已经读出,所以退回
 	}
-	cout<<" 共有 "<<filenum<<" 个文件被解压!"<<endl;
-	fin.close();
-//	fout.close();
+	if (verbose)
+	{
+		cout << "    Total: " << filenum << " files extracted." << endl;
+	}
+	fclose(fin);
+	return 0;
 }
+
+int main(int argc,char *argv[])
+{
+	cout << "UnWebCompiler for Linux" << endl << endl;
+
+	if (argc == 1)
+	{
+		// no parameters given. display usage.
+		cout << "  Usage: " << argv[0] << " [-d output_base_path] file1.exe file2.exe ..." << endl;
+		exit(0);
+	}
+
+	// obtain parameters
+	vector<string> infiles;
+	string outputbasepath;
+	int c;
+	while ((c = getopt(argc, argv, "vd:")) != -1)
+	{
+		switch (c)
+		{
+			case 'v':
+				verbose = true;
+				break;
+			case 'd':
+				outputbasepath = optarg;
+				printf("%s\n", optarg);
+				break;
+			default:
+				exit(1);
+		}
+	}
+
+	if (optind >= argc)
+	{
+		fprintf(stderr, "Expected argument after options.\n");
+		exit(EXIT_FAILURE);
+	}
+
+	while (optind < argc)
+	{
+		infiles.insert(infiles.end(), argv[optind++]);
+	}
+
+	// process files one by one
+	for (unsigned int i = 0; i < infiles.size(); i++)
+	{
+		cout << "  Extracting " << infiles[i] << endl;
+		int n = extract(infiles[i].c_str(), outputbasepath.c_str());
+		cout << (!n ? "    ... done" : "    ... failed") << endl;
+	}
+
+	exit(EXIT_SUCCESS);
+}
+
